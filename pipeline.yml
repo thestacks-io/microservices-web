@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Microservices Web Pipeline
+
+Parameters:
+  GitHubOwner:
+    Description: The name of the GitHub repository owner
+    Type: String
+  GitHubToken:
+    Type: String
+    Description: GitHub repository OAuth token
+    NoEcho: true
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
+  GitHubBranch:
+    Type: String
+    Description: GitHub repository branch
+    Default: 'master'
+  AppName:
+    Type: String
+    Description: Application name
+  ServiceName:
+    Type: String
+    Description: Service name.  Lowercase
+    Default: 'web'
+
+  Environment:
+    Type: String
+    Description: Environment
+    Default: 'prod'
+
+Resources:
+
+  #
+  # Bucket used by the pipelines to store artifacts.
+  #
+  PipelinesBucket:
+    Description: The artifact bucket required for inter-stage data exchange
+    Type: AWS::S3::Bucket
+
+  #
+  # IAM Role needed by the pipelines
+  #
+  CodePipelineRole:
+    Description: The role CodePipeline will assume during pipeline execution
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+
+  CodePipelinePolicy:
+    Description: Policy for the CodePipeline Role
+    DependsOn: CodePipelineRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-pipeline-policy'
+      Roles:
+        - !Ref CodePipelineRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - '*'
+            Resource:
+              - '*'
+
+  #
+  # IAM Role needed by cloudformation
+  #
+  CloudFormationRole:
+    Description: The role cloudformation will assume during pipeline execution
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+
+  CloudFormationPolicy:
+    Description: Policy for the cloudformation execution Role
+    DependsOn: CloudFormationRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-cloudformation-policy'
+      Roles:
+        - !Ref CloudFormationRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - '*'
+            Resource:
+              - '*'
+
+  #
+  # IAM role needed by our CodeBuild
+  #
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    Description: Policy for the codebuild execution
+    DependsOn: CodeBuildRole
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-codebuild-policy'
+      Roles:
+        - !Ref CodeBuildRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - '*'
+            Resource:
+              - '*'
+
+  #
+  # CodeBuild
+  #
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildPolicy
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/docker:17.09.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: REPOSITORY_URI
+            Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AppName}/${ServiceName}/${Environment}"
+          - Name: APP
+            Value: !Sub "${AppName}-${ServiceName}-${Environment}"
+      Name: !Sub '${AppName}-${ServiceName}-code-build-${Environment}'
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      TimeoutInMinutes: 10 # must be between 5 minutes and 8 hours
+
+  #
+  # Pipelines that create/update the cloudformation stacks within the project
+  # Prod environment.
+  #
+  Pipeline:
+    Description: '${AWS::StackName} Pipeline'
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+      - CodePipelinePolicy
+      - CloudFormationPolicy
+    Properties:
+      RestartExecutionOnUpdate: True
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelinesBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: CloneRepository
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: GitSource
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Branch: !Ref GitHubBranch
+                Repo: !Ref GitHubRepo
+                OAuthToken: !Ref GitHubToken
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: ECR
+              InputArtifacts:
+                - Name: GitSource
+              OutputArtifacts:
+                - Name: ECRSource
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                TemplatePath: "GitSource::stacks/ecr.stack.yml"
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt CloudFormationRole.Arn
+                StackName: !Sub '${AppName}-${ServiceName}-ecr-${Environment}'
+                ParameterOverrides: !Sub |
+                  {
+                    "RepositoryName": "${AppName}/${ServiceName}/${Environment}"
+                  }
+              RunOrder: 1
+            - Name: BuildPushImage
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: GitSource
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 2
+        - Name: Service
+          Actions:
+            - Name: Infrastructure
+              InputArtifacts:
+                - Name: GitSource
+                - Name: BuildOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                TemplatePath: "GitSource::stacks/service.stack.yml"
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt CloudFormationRole.Arn
+                StackName: !Sub '${AppName}-${ServiceName}-service-${Environment}'
+                ParameterOverrides: !Sub
+                  - |
+                    {
+                      "BuildVersion" : { "Fn::GetParam" : ["BuildOutput", "version.json", "version"]},
+                      "VPCStack" : "${VPCStack}",
+                      "ECSStack" : "${ECSStack}",
+                      "SharedStack" : "${SharedStack}",
+                      "RepositoryUrl": "${RepositoryUrl}",
+                      "Environment" : "${Environment}"
+                    }
+                  - {
+                      VPCStack: { "Fn::Sub" : [ "${AppName}-vpc-${Environment}", { AppName: {"Ref" : "AppName"},  Environment: {"Ref" : "Environment"} } ] },
+                      ECSStack: { "Fn::Sub" : [ "${AppName}-ecs-${Environment}", { AppName: {"Ref" : "AppName"},  Environment: {"Ref" : "Environment"} } ] },
+                      SharedStack: { "Fn::Sub" : [ "${AppName}-shared-${Environment}", { AppName: {"Ref" : "AppName"},  Environment: {"Ref" : "Environment"} } ] },
+                      RepositoryUrl: { "Fn::Sub" : [ "${AccountId}.dkr.ecr.${Region}.amazonaws.com/${AppName}/${ServiceName}/${Environment}", { AccountId: {"Ref" : "AWS::AccountId"}, Region: {"Ref" : "AWS::Region"}, ServiceName: {"Ref" : "ServiceName"}, Environment: {"Ref" : "Environment"} } ] },
+                      Environment: { "Ref" : "Environment"}
+                    }
+              RunOrder: 1
