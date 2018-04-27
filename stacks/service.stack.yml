@@ -60,10 +60,23 @@ Parameters:
     Type: Number
     Default: 2
 
+  TLD:
+    Type: String
+    Description: TLD name needed by Route53 to perform DNS (example.com)
+    Default: ''
+
+  Domain:
+    Type: String
+    Description: Domain name for your api (api.example.com)
+    Default: ''
+
 Conditions:
   UseBuildVersion: !Or
     - !Equals [!Ref Environment, 'dev']
     - !Equals [!Ref Version, '']
+  UseCustomDomain: !And
+    - !Not [!Equals [!Ref TLD, '']]
+    - !Not [!Equals [!Ref Domain, '']]
 
 Resources:
 
@@ -202,6 +215,7 @@ Resources:
 
   ListenerRuleHttps:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: UseCustomDomain
     Properties:
       ListenerArn:
         Fn::ImportValue:

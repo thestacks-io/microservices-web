@@ -29,6 +29,16 @@ Parameters:
     Description: Environment
     Default: 'prod'
 
+  TLD:
+    Type: String
+    Description: TLD name needed by Route53 to perform DNS (example.com)
+    Default: ''
+
+  Domain:
+    Type: String
+    Description: Domain name for your api (api.example.com)
+    Default: ''
+
 Resources:
 
   #
@@ -257,13 +267,17 @@ Resources:
                       "ECSStack" : "${ECSStack}",
                       "SharedStack" : "${SharedStack}",
                       "RepositoryUrl": "${RepositoryUrl}",
-                      "Environment" : "${Environment}"
+                      "Environment" : "${Environment}",
+                      "Domain" : "${Domain}",
+                      "TLD" : "${TLD}"
                     }
                   - {
                       VPCStack: { "Fn::Sub" : [ "${AppName}-vpc-${Environment}", { AppName: {"Ref" : "AppName"},  Environment: {"Ref" : "Environment"} } ] },
                       ECSStack: { "Fn::Sub" : [ "${AppName}-ecs-${Environment}", { AppName: {"Ref" : "AppName"},  Environment: {"Ref" : "Environment"} } ] },
                       SharedStack: { "Fn::Sub" : [ "${AppName}-shared-${Environment}", { AppName: {"Ref" : "AppName"},  Environment: {"Ref" : "Environment"} } ] },
                       RepositoryUrl: { "Fn::Sub" : [ "${AccountId}.dkr.ecr.${Region}.amazonaws.com/${AppName}/${ServiceName}/${Environment}", { AccountId: {"Ref" : "AWS::AccountId"}, Region: {"Ref" : "AWS::Region"}, ServiceName: {"Ref" : "ServiceName"}, Environment: {"Ref" : "Environment"} } ] },
-                      Environment: { "Ref" : "Environment"}
+                      Environment: { "Ref" : "Environment"},
+                      Domain: { "Ref" : "Domain"},
+                      TLD: { "Ref" : "TLD"}
                     }
               RunOrder: 1
